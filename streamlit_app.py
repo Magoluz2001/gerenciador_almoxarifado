@@ -28,6 +28,7 @@ if 'acessos' not in st.session_state:
 # ---------------------------------------------------------
 URL = st.secrets["SUPABASE_URL"]
 KEY = st.secrets["SUPABASE_KEY"]
+
 @st.cache_resource
 def conectar_banco():
     return create_client(URL, KEY)
@@ -149,8 +150,15 @@ def pagina_gestao_usuarios():
             elif p['funcao'] == 'ADMIN': status = "👑 [ADMINISTRADOR]"
             else: status = "🟢 [FUNCIONÁRIO]"
             
+            # --- NOVA LÓGICA DE BLOQUEIO ---
+            # Bloqueia se a matrícula do usuário do laço for igual à do usuário logado
+            e_o_proprio_usuario = p['matricula'] == st.session_state['usuario_matricula']
+            
             # Um bloco retrátil (expander) para cada usuário manter a tela limpa
             with st.expander(f"{status} {p['nome_completo']} - Matrícula: {p['matricula']} ({p['email']})"):
+                if e_o_proprio_usuario:
+                    st.info("ℹ️ Você não pode alterar as suas próprias permissões ou rebaixar seu próprio cargo.")
+
                 col1, col2 = st.columns([1, 2])
                 
                 with col1:
@@ -160,18 +168,19 @@ def pagina_gestao_usuarios():
                         options=["PENDENTE", "FUNCIONARIO", "ADMIN"], 
                         index=["PENDENTE", "FUNCIONARIO", "ADMIN"].index(p['funcao']),
                         key=f"func_{p['id']}",
-                        label_visibility="collapsed"
+                        label_visibility="collapsed",
+                        disabled=e_o_proprio_usuario # Bloqueia o campo
                     )
                 
                 with col2:
                     st.write("**Liberação de Páginas (Botões Individuais):**")
-                    chk_dash = st.checkbox("📊 Dashboard (Visualizar Estoque)", value=p.get('acesso_dashboard', False), key=f"d_{p['id']}")
-                    chk_mov  = st.checkbox("🔄 Movimentações (Entradas/Saídas)", value=p.get('acesso_movimentacoes', False), key=f"m_{p['id']}")
-                    chk_cad  = st.checkbox("📝 Cadastros (Adicionar Catálogo/SKU)", value=p.get('acesso_cadastros', False), key=f"c_{p['id']}")
-                    chk_aju  = st.checkbox("⚖️ Ajustes (Corrigir Estoque)", value=p.get('acesso_ajustes', False), key=f"a_{p['id']}")
+                    chk_dash = st.checkbox("📊 Dashboard (Visualizar Estoque)", value=p.get('acesso_dashboard', False), key=f"d_{p['id']}", disabled=e_o_proprio_usuario)
+                    chk_mov  = st.checkbox("🔄 Movimentações (Entradas/Saídas)", value=p.get('acesso_movimentacoes', False), key=f"m_{p['id']}", disabled=e_o_proprio_usuario)
+                    chk_cad  = st.checkbox("📝 Cadastros (Adicionar Catálogo/SKU)", value=p.get('acesso_cadastros', False), key=f"c_{p['id']}", disabled=e_o_proprio_usuario)
+                    chk_aju  = st.checkbox("⚖️ Ajustes (Corrigir Estoque)", value=p.get('acesso_ajustes', False), key=f"a_{p['id']}", disabled=e_o_proprio_usuario)
                 
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("💾 Salvar Permissões deste Usuário", key=f"btn_{p['id']}", type="primary"):
+                if st.button("💾 Salvar Permissões deste Usuário", key=f"btn_{p['id']}", type="primary", disabled=e_o_proprio_usuario):
                     try:
                         supabase.table("perfis").update({
                             "funcao": nova_funcao,
@@ -205,7 +214,16 @@ def pagina_dashboard():
             todos_lotes = supabase.table("lotes_validade").select("id, id_sku_relacionado").execute().data
             for l in todos_lotes:
                 if l['id_sku_relacionado'] in mapa_skus: mapa_lotes_historico[l['id']] = mapa_skus[l['id_sku_relacionado']]
-            metricas = { pb['id']: { "Produto": pb['nome_oficial'], "Unidade Licitacao": pb['unidade_medida'], "Unidade Estoque": "", "Estoque Atual Real": 0.0, "Total Saidas Real": 0.0, "Primeira Saida": None, "Lotes": [] } for pb in pb_data }
+            
+            metricas = { pb['id']: { 
+                "Produto": pb['nome_oficial'], 
+                "Unidade Licitacao": pb['unidade_medida'], 
+                "Unidade Estoque": "", 
+                "Estoque Atual Real": 0.0, 
+                "Total Saidas Real": 0.0, 
+                "Primeira Saida": None, 
+                "Lotes": [] 
+            } for pb in pb_data }
 
             for lote in lotes_data:
                 sku = mapa_skus.get(lote['id_sku_relacionado'])
@@ -227,6 +245,19 @@ def pagina_dashboard():
                         data_mov = datetime.datetime.fromisoformat(mov['data_movimentacao'].replace('Z', '+00:00')).date()
                         if metricas[base_id]['Primeira Saida'] is None or data_mov < metricas[base_id]['Primeira Saida']: metricas[base_id]['Primeira Saida'] = data_mov
 
+            # --- CÁLCULO DE MÉDIA E ESTIMATIVA ---
+            for m in metricas.values():
+                if m['Primeira Saida']:
+                    dias_passados = max(1, (hoje - m['Primeira Saida']).days)
+                    m['Media Diaria'] = m['Total Saidas Real'] / dias_passados
+                    if m['Media Diaria'] > 0:
+                        m['Dias Restantes'] = m['Estoque Atual Real'] / m['Media Diaria']
+                    else:
+                        m['Dias Restantes'] = float('inf')
+                else:
+                    m['Media Diaria'] = None
+                    m['Dias Restantes'] = None
+
             grupos_com_estoque = [m for m in metricas.values() if m['Estoque Atual Real'] > 0]
             grupos_com_estoque.sort(key=lambda x: x['Produto'])
 
@@ -235,15 +266,27 @@ def pagina_dashboard():
             else:
                 for m in grupos_com_estoque:
                     unidade_exibicao = m['Unidade Estoque'] if m['Unidade Estoque'] else m['Unidade Licitacao']
+                    
+                    # Definição dos textos de exibição
                     saldo_formatado = formatar_unidade(m['Estoque Atual Real'], unidade_exibicao)
                     
-                    st.subheader(f"📦 {m['Produto']}")
-                    st.write(f"**Saldo Total:** {saldo_formatado}")
+                    if m['Media Diaria'] is not None:
+                        media_formatada = f"{formatar_unidade(m['Media Diaria'], unidade_exibicao)} / dia"
+                        est_dias = "Infinito" if m['Dias Restantes'] == float('inf') else f"{m['Dias Restantes']:.1f} dias"
+                    else:
+                        media_formatada = "Sem histórico de saída"
+                        est_dias = "Dados não disponíveis"
                     
-                    # Exibição detalhada por lote sem expandir
+                    st.subheader(f"📦 {m['Produto']}")
+                    
+                    # Exibição das métricas alinhadas
+                    c1, c2, c3 = st.columns(3)
+                    c1.write(f"**Saldo Total:** {saldo_formatado}")
+                    c2.write(f"**Consumo Médio:** {media_formatada}")
+                    c3.write(f"**Est. Duração:** {est_dias}")
+                    
                     st.markdown("**Estoque por Lote:**")
                     for l in m['Lotes']:
-                        # Exibe quantidade física e, entre parênteses, a quantidade de embalagens (pacotes/unidade)
                         st.write(f"- {l['descricao']} (Lote: {l['lote']}): **{formatar_unidade(l['qtd_real'], l['unidade'])}** ({l['pacotes']} embalagens)")
                     
                     st.markdown("---")

@@ -2,6 +2,7 @@ import streamlit as st
 from supabase import create_client, Client
 import time
 import datetime
+import unicodedata
 
 # ---------------------------------------------------------
 # CONFIGURAÇÃO GERAL DA PÁGINA E ESTADOS
@@ -258,8 +259,14 @@ def pagina_dashboard():
                     m['Media Diaria'] = None
                     m['Dias Restantes'] = None
 
+            # --- FUNÇÃO PARA IGNORAR ACENTOS APENAS NA ORDENAÇÃO ---
+            def ignorar_acentos(texto):
+                return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8').lower()
+
             grupos_com_estoque = [m for m in metricas.values() if m['Estoque Atual Real'] > 0]
-            grupos_com_estoque.sort(key=lambda x: x['Produto'])
+            
+            # Ordena aplicando a função de limpeza de acentos
+            grupos_com_estoque.sort(key=lambda x: ignorar_acentos(x['Produto']))
 
             if not grupos_com_estoque:
                 st.info("Nenhum produto em estoque no momento.")
